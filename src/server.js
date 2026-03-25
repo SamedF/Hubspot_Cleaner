@@ -89,9 +89,32 @@ async function processEvent(event) {
     return;
   }
 
-  const targetMessage = messageId
+  let targetMessage = messageId
     ? await getMessage(threadId, messageId)
     : await getLatestMessage(threadId);
+
+  if (targetMessage && isHubSpotNotificationMessage(targetMessage)) {
+    log('info', 'Webhook message looks like HubSpot notification, scanning thread for real inbound email', {
+      threadId,
+      messageId: targetMessage.id || messageId,
+      subject: targetMessage.subject || null,
+      senders: extractSenderValues(targetMessage)
+    });
+
+    const messages = await getMessages(threadId);
+    const fallbackMessage = findRealInboundCandidate(messages);
+
+    if (fallbackMessage) {
+      targetMessage = fallbackMessage;
+      log('info', 'Using fallback inbound message from thread scan', {
+        threadId,
+        originalMessageId: messageId,
+        fallbackMessageId: fallbackMessage.id || null,
+        subject: fallbackMessage.subject || null,
+        senders: extractSenderValues(fallbackMessage)
+      });
+    }
+  }
 
   if (!targetMessage) {
     log('warn', 'No target message found for thread', { threadId, messageId });
@@ -148,8 +171,7 @@ async function processEvent(event) {
 }
 
 function shouldHandleMessage(thread, message, content) {
-  const attachments = Array.isArray(message.attachments) ? message.attachments : [];
-  const hasIcs = attachments.some(isIcsAttachment);
+  const hasIcs = hasIcsAttachment(message);
 
   if (config.requireIcs && !hasIcs) {
     return { shouldHandle: false, reason: 'No .ics attachment' };
@@ -215,9 +237,56 @@ function extractSenderValues(message) {
   }).filter(Boolean);
 }
 
+function normalizeSenders(message) {
+  return extractSenderValues(message).map((value) => String(value || '').toLowerCase());
+}
+
+function isHubSpotNotificationMessage(message) {
+  const senders = normalizeSenders(message);
+  const subject = String(message?.subject || '').toLowerCase();
+
+  return (
+    senders.some((sender) => sender.includes('noreply@notifications.hubspot.com')) ||
+    subject.startsWith('new email conversation from')
+  );
+}
+
+function hasIcsAttachment(message) {
+  const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
+  return attachments.some(isIcsAttachment);
+}
+
+function findRealInboundCandidate(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return null;
+  }
+
+  return messages.find((message) => {
+    const direction = String(message?.direction || '').toUpperCase();
+    if (direction !== 'INCOMING') {
+      return false;
+    }
+
+    if (isHubSpotNotificationMessage(message)) {
+      return false;
+    }
+
+    return hasIcsAttachment(message);
+  }) || null;
+}
+
 async function getThread(threadId) {
   const response = await hubspotRequest(() => hubspot.get(`/conversations/v3/conversations/threads/${threadId}`));
   return response.data || null;
+}
+
+async function getMessages(threadId) {
+  const response = await hubspotRequest(() =>
+    hubspot.get(`/conversations/v3/conversations/threads/${threadId}/messages`, {
+      params: { limit: 20, sort: '-createdAt' }
+    })
+  );
+  return response.data?.results || [];
 }
 
 async function getMessage(threadId, messageId) {
