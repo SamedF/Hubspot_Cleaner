@@ -467,10 +467,14 @@ function matchesAnyRegex(value, patterns) {
 }
 
 function splitCsv(value) {
-  return String(value || '')
+  if (!value || String(value).trim() === '') {
+    return [];
+  }
+
+  return String(value)
     .split(',')
     .map((item) => item.trim())
-    .filter(Boolean);
+    .filter((item) => item.length > 0);
 }
 
 function stripHtml(input) {
